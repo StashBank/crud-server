@@ -1,101 +1,94 @@
 import { Injectable } from '@nestjs/common';
 import { Observable } from 'rxjs';
-import { of } from 'rxjs';
+import { Subject } from 'rxjs';
+import { of, from, pipe } from 'rxjs';
+import { map, switchMap  } from 'rxjs/operators';
 import { Guid } from 'guid-typescript';
-import * as fs from 'fs';
-import * as path from 'path';
+import { DatabaseService } from 'core/database/database.service';
+import * as firebase from 'firebase';
 
 @Injectable()
 export class CrudService {
-  private DB = {};
-  private readonly dbFilePath = path.join(__dirname, '/database.json');
+  private DB: firebase.database.Database;
 
-  constructor() {
+  constructor(private databaseService: DatabaseService) {
     this.initDb();
   }
 
   private initDb() {
-    this.DB = require('./database.json');
-  }
-
-  private syncDb() {
-    const db = this.DB || {};
-    fs.writeFile(this.dbFilePath, JSON.stringify(db), err => {
-      if (err) {
-        throw err;
-      }
-    });
+    this.DB = this.databaseService.db;
   }
 
   getDomains(): Observable<string[]> {
-    const domains = Object.keys(this.DB);
-    return of(domains);
+    const entityRef = this.databaseService.rootRef;
+    const resp = entityRef.once('value');
+    return from(resp).pipe(
+      map((snapshot: firebase.database.DataSnapshot) => snapshot.val()),
+      map(val => Object.keys(val || {})),
+    );
   }
 
   getDomainSchemas(domain: string): Observable<string[]>  {
-    const domainData = this.DB[domain] || {};
-    const schemas = Object.keys(domainData);
-    return of(schemas);
+    const entityRef = this.getEntityRef(domain);
+    const resp = entityRef.once('value');
+    return from(resp).pipe(
+      map((snapshot: firebase.database.DataSnapshot) => snapshot.val()),
+      map(val => Object.keys(val || {})),
+    );
   }
 
   getDomainSchemaObjects(domain: string, schema: string): Observable<any[]>  {
-    const domainData = this.DB[domain] || {};
-    const schemaData = domainData[schema] || [];
-    const objects = schemaData;
-    return of(objects);
+    const entityRef = this.getEntityRef(domain, schema);
+    const resp = entityRef.once('value');
+    return from(resp).pipe(
+      map((snapshot: firebase.database.DataSnapshot) => snapshot.val()),
+      map(val => Object.keys(val || {}).map(id => Object.assign({}, val[id], {id}))),
+    );
   }
 
   getDomainSchemaObjectById(domain: string, schema: string, id: string): Observable<any>  {
-    const domainData = this.DB[domain] || {};
-    const schemaData: any[] = domainData[schema] || [];
-    const object = schemaData.find(i => i.id === id);
-    return of(object);
+    const entityRef = this.getEntityRef(domain, schema, id);
+    const resp = entityRef.once('value');
+    return from(resp).pipe(
+      map((snapshot: firebase.database.DataSnapshot) => snapshot.val()),
+      map(v => v ? Object.assign(v, { id }) : null),
+    );
   }
 
   addDomainSchemaObject(domain: string, schema: string, data: any): Observable<any> {
-    if (!this.DB[domain]) {
-      this.DB[domain] = { [schema]: [] };
-    }
-    data.id = Guid.create().toString();
-    this.DB[domain][schema].push(data);
-    this.syncDb();
-    return of(data);
+    const id = Guid.create().toString();
+    return this.setDomainSchemaObject(domain, schema, id, data);
   }
 
   setDomainSchemaObject(domain: string, schema: string, id: string, data: any): Observable<any> {
-    if (!this.DB[domain]) {
-      this.DB[domain] = { [schema]: [] };
-    }
-    const objects: any[] = this.DB[domain][schema];
-    const object = objects.find(i => i.id === id);
-    const index = objects.indexOf(object);
-    const newData = Object.assign({}, data, { id });
-    objects[index] = newData;
-    this.syncDb();
-    return of(newData);
+    const entityRef = this.getEntityRef(domain, schema, id);
+    const resp = entityRef.set(data)
+      .then(() => entityRef.once('value'));
+    return from(resp).pipe(
+      map((snapshot: firebase.database.DataSnapshot) => snapshot.val()),
+      map(v => Object.assign(v, { id })),
+    );
   }
 
   changeDomainSchemaObject(domain: string, schema: string, id: string, data: any): Observable<any> {
-    if (!this.DB[domain]) {
-      this.DB[domain] = { [schema]: [] };
-    }
-    const objects: any[] = this.DB[domain][schema];
-    const object = objects.find(i => i.id === id);
-    const index = objects.indexOf(object);
-    const newData = Object.assign({}, object, data, { id });
-    objects[index] = newData;
-    this.syncDb();
-    return of(newData);
+    const entityRef = this.getEntityRef(domain, schema, id);
+    const resp = entityRef.once('value');
+    return from(resp).pipe(
+      map((snapshot: firebase.database.DataSnapshot) => snapshot.val()),
+      map(v => Object.assign(v || {}, data, { id })),
+      switchMap(v => entityRef.set(v).then(() => entityRef.once('value'))),
+      map((snapshot: firebase.database.DataSnapshot) => snapshot.val()),
+    );
   }
 
   removeDomainSchemaObject(domain, schema, id): Observable<any> {
-    if (!this.DB[domain]) {
-      this.DB[domain] = { [schema]: [] };
-    }
-    const objects: any[] = this.DB[domain][schema];
-    const object = objects.find(i => i.id === id);
-    const index = objects.indexOf(object);
-    objects.splice(index, 1);
-    return of({});
+    const entityRef = this.getEntityRef(domain, schema, id);
+    return from(entityRef.remove()).pipe(map(() => {}));
+  }
+
+  private getEntityRef(...parts: string[]): firebase.database.Reference {
+    const path = parts.join('/');
+    const ref = this.DB.ref(path);
+    return ref;
   }
 }
